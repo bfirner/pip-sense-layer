@@ -124,6 +124,21 @@ typedef struct {
 	unsigned char data[20];      //The optional variable length data segment
 } __attribute__((packed)) pip_packet_t;
 
+typedef struct {
+	unsigned char tagID[2];//Transmitter ID and parity
+  unsigned char sequence  : 8; //Sequence number
+	unsigned char rssi      : 8; //Received signal strength indicator
+} __attribute__((packed)) compressed_packet_t;
+
+
+typedef struct {
+	unsigned char ex_length : 8; //Length of data in the optional data portion
+	unsigned char dropped   : 8; //The number of packet that were dropped if the queue overflowed.
+	unsigned int boardID    : 24;//Basestation ID
+	unsigned int time       : 32;//Timestamp in quarter microseconds.
+  compressed_packet_t packets[4];
+} __attribute__((packed)) multipacket_t;
+
 //USB PIPs' vendor ID and strings
 const char *silicon_labs_s = "Silicon Labs\0";
 const char *serial_num_s = "1234\0";
@@ -327,12 +342,16 @@ int main(int ac, char** arg_vector) {
                 retval = libusb_bulk_transfer(*I, 1 | LIBUSB_ENDPOINT_IN, buf+1, PACKET_LEN+20, &transferred, timeout);
                 if (0 > retval) {
                   std::cout<<"Error transferring data (old pip): "<<strerror(retval)<<'\n';
+                  retries_left = 0;
+                  retval = -1;
                 }
               }
               else {
                 retval = libusb_bulk_transfer(*I, 2 | LIBUSB_ENDPOINT_IN, buf+1, PACKET_LEN+20, &transferred, timeout);
                 if (0 > retval) {
                   std::cout<<"Error transferring data (gpip): "<<strerror(retval)<<'\n';
+                  retries_left = 0;
+                  retval = -1;
                 }
               }
               //Fill in the length of the extra portion of the packet
@@ -352,49 +371,96 @@ int main(int ac, char** arg_vector) {
               got_packet = true;
               //Overlay the packet struct on top of the pointer to the pip's message.
               pip_packet_t *pkt = (pip_packet_t *)buf;
+              multipacket_t *pkts = (multipacket_t *)buf;
 
               //Check to make sure this was a good packet.
-              if ((pkt->rssi != (int) 0) and (pkt->status != 0)) {
-                unsigned char* data = (unsigned char*)pkt;
+              bool multipacket = true;
+              if (not multipacket) {
+                if ((pkt->rssi != (int) 0) and (pkt->status != 0)) {
+                  unsigned char* data = (unsigned char*)pkt;
 
-                //Even parity check
-                bool parity_failed = false;
-                {
-                  unsigned char p1 = 0;
-                  unsigned char p2 = 0;
-                  unsigned char p3 = 0;
-                  unsigned long packet = ((unsigned int)data[9]  << 16) |
-                    ((unsigned int)data[10] <<  8) |
-                    ((unsigned int)data[11]);
+                  //Even parity check
+                  bool parity_failed = false;
+                  {
+                    unsigned char p1 = 0;
+                    unsigned char p2 = 0;
+                    unsigned char p3 = 0;
+                    unsigned long packet = ((unsigned int)data[9]  << 16) |
+                      ((unsigned int)data[10] <<  8) |
+                      ((unsigned int)data[11]);
 
-                  int i;
-                  /* XOR each group of 3 bytes until all of the 24 bits have been XORed. */
-                  for (i = 7; i >= 0; --i) {
-                    unsigned char triple = (packet >> (3 * i)) & 0x7;
-                    p1 ^= triple >> 2;
-                    p2 ^= (triple >> 1) & 0x1;
-                    p3 ^= triple & 0x1;
+                    int i;
+                    /* XOR each group of 3 bytes until all of the 24 bits have been XORed. */
+                    for (i = 7; i >= 0; --i) {
+                      unsigned char triple = (packet >> (3 * i)) & 0x7;
+                      p1 ^= triple >> 2;
+                      p2 ^= (triple >> 1) & 0x1;
+                      p3 ^= triple & 0x1;
+                    }
+                    /* If the end result of the XORs is three 0 bits then even parity held,
+                     * which suggests that the packet data is good. Otherwise there was a bit error. */
+                    if (p1 ==  0 && p2 == 0 && p3 == 0) {
+                      parity_failed = false;
+                    }
+                    else {
+                      parity_failed = true;
+                    }
                   }
-                  /* If the end result of the XORs is three 0 bits then even parity held,
-                   * which suggests that the packet data is good. Otherwise there was a bit error. */
-                  if (p1 ==  0 && p2 == 0 && p3 == 0) {
-                    parity_failed = false;
-                  }
-                  else {
-                    parity_failed = true;
+                  if (not parity_failed) {
+                    //Now assemble a sample data variable and send it to the aggregation server.
+                    SampleData sd;
+                    //Calculate the tagID here instead of using be32toh since it is awkward to convert a
+                    //21 bit integer to 32 bits. Multiply by 8192 and 32 instead of shifting by 13 and 5
+                    //bits respectively to avoid endian issues with bit shifting.
+                    unsigned int netID = ((unsigned int)data[9] * 8192)  + ((unsigned int)data[10] * 32) +
+                      ((unsigned int)data[11] >> 3);
+                    //We do not currently use the pip's local timestamp
+                    //unsigned long time = ntohl(pkt->time);
+                    unsigned long baseID = ntohl(pkt->boardID << 8);
+
+                    //The physical layer of a pipsqueak device is 1
+                    sd.physical_layer = 1;
+                    sd.tx_id = netID;
+                    sd.rx_id = baseID;
+                    //Set this to the real timestamp, milliseconds since 1970
+                    timeval tval;
+                    gettimeofday(&tval, NULL);
+                    sd.rx_timestamp = tval.tv_sec*1000 + tval.tv_usec/1000;
+                    //Convert from one byte value to a float for receive signal
+                    //strength as described in the TI/chipcon Design Note DN505 on cc1100
+                    sd.rss = ( (pkt->rssi) >= 128 ? (signed int)(pkt->rssi-256)/2.0 : (pkt->rssi)/2.0) - RSSI_OFFSET;
+                    sd.sense_data = std::vector<unsigned char>(pkt->data, pkt->data+buf[0]);
+                    sd.valid = true;
+
+                    if (pip_debug > DEBUG_GOOD) { 
+                      printf("pkt tx: %0x rx: %0lx rss: %0.2f data length %0x \n", 
+                          netID, baseID, sd.rss, pkt->ex_length);
+                    }
+
+                    if (pip_debug > DEBUG_BAD
+                        and 0 < pkt->dropped) { 
+                      std::cout<<"USB under-read, "<<(unsigned int)pkt->dropped<<" packets dropped.\n";
+                    }
+
+
+                    //Send the sample data as long as it meets the min RSS constraint
+                    if (sd.rss > min_rss) {
+                      agg.send(sd);
+                    }
                   }
                 }
-                if (not parity_failed) {
+              }
+              //Using multipacket format
+              else {
+                //In multipacket format data has already been checked
+                //Four packets in this USB packet
+                for (int multipart = 0; multipart < 4; ++multipart) {
                   //Now assemble a sample data variable and send it to the aggregation server.
                   SampleData sd;
-                  //Calculate the tagID here instead of using be32toh since it is awkward to convert a
-                  //21 bit integer to 32 bits. Multiply by 8192 and 32 instead of shifting by 13 and 5
-                  //bits respectively to avoid endian issues with bit shifting.
-                  unsigned int netID = ((unsigned int)data[9] * 8192)  + ((unsigned int)data[10] * 32) +
-                    ((unsigned int)data[11] >> 3);
-                  //We do not currently use the pip's local timestamp
-                  //unsigned long time = ntohl(pkt->time);
-                  unsigned long baseID = ntohl(pkt->boardID << 8);
+                  compressed_packet_t single = pkts->packets[multipart];
+                  //Calculate the tagID here. It was dropped from 24 bits to 16 (still has 3 parity bits)
+                  unsigned int netID = (((unsigned int)single.tagID[0])<<5) + (single.tagID[1]>>3);
+                  unsigned long baseID = ntohl(pkts->boardID << 8);
 
                   //The physical layer of a pipsqueak device is 1
                   sd.physical_layer = 1;
@@ -406,24 +472,27 @@ int main(int ac, char** arg_vector) {
                   sd.rx_timestamp = tval.tv_sec*1000 + tval.tv_usec/1000;
                   //Convert from one byte value to a float for receive signal
                   //strength as described in the TI/chipcon Design Note DN505 on cc1100
-                  sd.rss = ( (pkt->rssi) >= 128 ? (signed int)(pkt->rssi-256)/2.0 : (pkt->rssi)/2.0) - RSSI_OFFSET;
-                  sd.sense_data = std::vector<unsigned char>(pkt->data, pkt->data+buf[0]);
+                  sd.rss = ( (single.rssi) >= 128 ? (signed int)(single.rssi-256)/2.0 : (single.rssi)/2.0) - RSSI_OFFSET;
+                  sd.sense_data = std::vector<unsigned char>();
                   sd.valid = true;
 
                   if (pip_debug > DEBUG_GOOD) { 
-                    printf("pkt tx: %0x rx: %0lx rss: %0.2f data length %0x \n", 
-                        netID, baseID, sd.rss, pkt->ex_length);
+                    printf("pkt tx: %0x rx: %0lx rss: %0.2f (compressed group of 4)\n", 
+                        netID, baseID, sd.rss);
                   }
 
                   if (pip_debug > DEBUG_BAD
                       and 0 < pkt->dropped) { 
                     std::cout<<"USB under-read, "<<(unsigned int)pkt->dropped<<" packets dropped.\n";
                   }
-		  
 
-                  //Send the sample data as long as it meets the min RSS constraint
-                  if (sd.rss > min_rss) {
-                    agg.send(sd);
+
+                  //Send this value if it is valid
+                  if (0 != netID) {
+                    //Send the sample data as long as it meets the min RSS constraint
+                    if (sd.rss > min_rss) {
+                      agg.send(sd);
+                    }
                   }
                 }
               }
