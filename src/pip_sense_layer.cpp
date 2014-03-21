@@ -68,7 +68,6 @@ using std::pair;
 #define DEBUG_BAD 1 
 #define DEBUG_GOOD 5 
 #define DEBUG_ALL  10
-unsigned int pip_debug ; 
 
 //Global variable for the signal handler.
 bool killed = false;
@@ -111,11 +110,13 @@ typedef struct {
 
 int main(int ac, char** arg_vector) {
   bool offline = false;
+  unsigned int pip_debug = 0;
 
   if ("offline" == std::string(arg_vector[ac-1])) {
     //Don't look at this last argument
     ac -= 1;
     offline = true;
+	pip_debug = DEBUG_ALL;
   }
 
   if (ac != 3 and ac != 4 and ac != 5 ) {
@@ -149,9 +150,6 @@ int main(int ac, char** arg_vector) {
 
   //Set up a signal handler to catch interrupt signals so we can close gracefully
   signal(SIGINT, handler);  
-
-  //Now connect to pip devices and send their packet data to the aggregation server.
-  char buf[MAX_PACKET_SIZE_READ];
 
   //Initialize SPI connection
   if (!bcm2835_init()) {
@@ -190,16 +188,32 @@ int main(int ac, char** arg_vector) {
       while ((offline or agg) and not killed) {
 
 		//Try to read some data. First see how long the next packet is
-		uint8_t transferred = bcm2835_spi_transfer(0xFF);
+		//Sending 0xFF initialized a packet transmission
+		bcm2835_spi_transfer(0xFF);
+		//Read twice to get the length value (first time it isn't ready)
+		uint8_t transferred = bcm2835_spi_transfer(0x1);
+		transferred = bcm2835_spi_transfer(0x1);
 		//Verify that there is a packet to read
 		if (0 < transferred and transferred <= MAX_PACKET_SIZE_READ) {
+			std::cout<<"Reading packet of length "<<(unsigned int)transferred<<'\n';
+			uint8_t buf[MAX_PACKET_SIZE_READ];
 			memset(buf, 0, MAX_PACKET_SIZE_READ);	  
 			//Get the packet
-			bcm2835_spi_transfern(buf, transferred);
+			bcm2835_spi_transfernb((char*)buf, (char*)buf, (unsigned int)transferred);
+
+			//TODO FIXME Debugging received packet
+			std::cout<<"Packet is: ";
+			for (int i = 0; i < transferred; ++i) {
+				std::cout<<'\t'<<std::hex<<(uint32_t)buf[i];
+			}
+			std::cout<<'\n';
+			
+
+
 			//Overlay the packet struct on top of the pointer to the rpip's message.
 			pip_packet_t *pkt = (pip_packet_t *)buf;
 			//Check to make sure this was a good packet.
-			if ((pkt->rssi != (int) 0) and (pkt->status != 0)) {
+			if (((pkt->rssi != (int) 0) and (pkt->status != 0))) {
 				unsigned char* data = (unsigned char*)pkt;
 
 				//Even parity check
@@ -229,7 +243,7 @@ int main(int ac, char** arg_vector) {
 						parity_failed = true;
 					}
 				}
-				if (not parity_failed) {
+				if (true or not parity_failed) {
 					//Now assemble a sample data variable and send it to the aggregation server.
 					SampleData sd;
 					//Calculate the tagID here instead of using be32toh since it is awkward to convert a
@@ -267,7 +281,7 @@ int main(int ac, char** arg_vector) {
 
 
 					//Send the sample data as long as it meets the min RSS constraint
-					if (sd.rss > min_rss) {
+					if (true or sd.rss > min_rss) {
 						//Send data to the aggregator if we are not in offline mode
 						//Otherwise print out the packet
 						if (not offline) {
@@ -300,9 +314,14 @@ int main(int ac, char** arg_vector) {
 		}
 		//Size seems too large, read from SPI to empty the buffer
 		else if (transferred >= MAX_PACKET_SIZE_READ) {
+			std::cerr<<"SPI seems mis-aligned (got packet of length "<<(unsigned int)transferred<<"), trying to realign\n";
+			//Toggle SPI
+			//Turn on SPI pins
+			bcm2835_spi_end();
+			bcm2835_spi_begin();
 			//Read until we get a 0
-			std::cerr<<"SPI seems mis-aligned, trying to realign\n";
 			while (0 != bcm2835_spi_transfer(0xFD));
+			std::cerr<<"SPI re-aligned\n";
 		}
 		//No data, so try to sleep to reduce CPU consumption
 		else {
