@@ -24,6 +24,9 @@ Dependencies
 
   git clone git://github.com/OwlPlatform/cpp-owl-sensor.git
 
+  The SPI bus interface requires the bcm2835 library, which is available from
+  http://www.airspayce.com/mikem/bcm2835
+
 Building
 --------
   The build process is as follows:
