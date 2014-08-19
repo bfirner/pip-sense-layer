@@ -253,11 +253,6 @@ void attachPIPs(list<libusb_device_handle*> &pip_devs) {
 
 int main(int ac, char** arg_vector) {
   bool offline = false;
-	//Tags IDs which are using CRC rather than legacy parity.
-	//If a tag that seems to be using parity arrives with the
-	//same ID as a tag in this list for two such receptions before
-	//assuming that it was not an erroneous packet.
-	std::set<unsigned int> crc_tags;
 
   if ("offline" == std::string(arg_vector[ac-1])) {
     //Don't look at this last argument
@@ -265,12 +260,12 @@ int main(int ac, char** arg_vector) {
     offline = true;
   }
 
-  if (ac != 3 and ac != 4 and ac != 5 ) {
+  if (ac < 3) {
     std::cerr<<"This program requires 2 arguments,"<<
       " the ip address and the port number of the aggregation server to send data to.\n";
     std::cerr<<"An optional third argument specifies the minimum RSS for a packet to be reported.\n";
-    std::cerr<<"An optional forth argument specifies the debug level (1-10) \n";
-    std::cerr<<"If 'offline' is given as the last argument then this program will not connect to the aggregator and will instead print packets to the screen.\n";
+		std::cerr<<"Additional arguments will specify CRC tags that are coexisting with the parity transmitters.\n";
+		std::cerr<<"If 'offline' is given as the last argument, the program will just print received packets.\n";
     return 0;
   }
 
@@ -284,15 +279,13 @@ int main(int ac, char** arg_vector) {
     std::cout<<"Using min RSS "<<min_rss<<'\n';
   }
 
-  if (ac > 4) {
-    pip_debug = atoi(arg_vector[4]);
-    if ( (pip_debug >= 1) && (pip_debug <= 10)) { 
-      std::cout<<"Using debug level "<<pip_debug<<'\n';
-    } else {
-      std::cout<<"bad debug level "<<pip_debug<<'\n';   
-      pip_debug = 0;      
-    }
-  }
+	//Tags IDs which are using CRC rather than legacy parity.
+	//These tags will unfortunately have no error checking
+	std::set<unsigned int> crc_tags;
+	for (int i = 4; i < ac; ++i) {
+		std::cout<<"Treating "<<arg_vector[i]<<" as a CRC tag.\n";
+		crc_tags.insert(atoi(arg_vector[i]));
+	}
 
   //Set up a signal handler to catch interrupt signals so we can close gracefully
   signal(SIGINT, handler);  
@@ -422,12 +415,7 @@ int main(int ac, char** arg_vector) {
 								((unsigned int)data[11] );
 
 							//True if either the CRC passes or parity passes
-							bool error_free = pkt->crcok;
-
-							//Remember this as a CRC tag
-							if (pkt->crcok) {
-								crc_tags.insert(netID);
-							}
+							bool error_free = crc_tags.count(netID);
 
 							//Try checking parity if this didn't pass CRC
 							if (not error_free) {
@@ -460,14 +448,6 @@ int main(int ac, char** arg_vector) {
 									if (p1 ==  0 && p2 == 0 && p3 == 0) {
 										//Seems like a correct transmitter using the legacy parity format
 										error_free = true;
-										//If this tag is in the CRC tag list, wait for two parity
-										//packets to confirm the transition from CRC to parity.
-										//This is meant to catch the occasional error where a CRC
-										//tag just happens to pass parity.
-										if (crc_tags.count(netID)) {
-											crc_tags.erase(netID);
-											error_free = false;
-										}
 									}
 									else {
 										//Both CRC and parity failed
