@@ -50,6 +50,7 @@
 #include <string>
 #include <list>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <stdexcept>
 
@@ -120,8 +121,22 @@ typedef struct {
 	unsigned char dropped   : 8; //The number of packet that were dropped if the queue overflowed.
 	unsigned int boardID    : 24;//Basestation ID
 	unsigned int time       : 32;//Timestamp in quarter microseconds.
+	unsigned int tagID      : 21;//Transmitter ID
+	unsigned int parity     : 3; //Even parity check on the transmitter ID
+	unsigned char rssi      : 8; //Received signal strength indicator
+  unsigned char lqi       : 7; //The lower 7 bits contain the link quality indicator
+	unsigned char crcok     : 1; 
+	unsigned char data[20];      //The optional variable length data segment
+} __attribute__((packed)) old_pip_packet_t;
+
+//PIP 3 Byte ID packet structure with variable data segment.
+//3 Byte receiver ID, 3 byte transmitter id, plus up to 20 bytes of extra data.
+typedef struct {
+	unsigned char ex_length : 8; //Length of data in the optional data portion
+	unsigned char dropped   : 8; //The number of packet that were dropped if the queue overflowed.
+	unsigned int boardID    : 24;//Basestation ID
+	unsigned int time       : 32;//Timestamp in quarter microseconds.
 	unsigned int tagID      : 24;//Transmitter ID
-//	unsigned int parity     : 3; //Even parity check on the transmitter ID
 	unsigned char rssi      : 8; //Received signal strength indicator
   unsigned char lqi       : 7; //The lower 7 bits contain the link quality indicator
 	unsigned char crcok     : 1; 
@@ -238,6 +253,11 @@ void attachPIPs(list<libusb_device_handle*> &pip_devs) {
 
 int main(int ac, char** arg_vector) {
   bool offline = false;
+	//Tags IDs which are using CRC rather than legacy parity.
+	//If a tag that seems to be using parity arrives with the
+	//same ID as a tag in this list for two such receptions before
+	//assuming that it was not an erroneous packet.
+	std::set<unsigned int> crc_tags;
 
   if ("offline" == std::string(arg_vector[ac-1])) {
     //Don't look at this last argument
@@ -395,50 +415,72 @@ int main(int ac, char** arg_vector) {
               got_packet = true;
               //Overlay the packet struct on top of the pointer to the pip's message.
               pip_packet_t *pkt = (pip_packet_t *)buf;
+							unsigned char* data = (unsigned char*)pkt;
+
+							//Calculate the ID assuming this is a CRC packet
+							unsigned int netID = ((unsigned int)data[9] * 65536)  + ((unsigned int)data[10] * 256) +
+								((unsigned int)data[11] );
+
+							//True if either the CRC passes or parity passes
+							bool error_free = pkt->crcok;
+
+							//Remember this as a CRC tag
+							if (pkt->crcok) {
+								crc_tags.insert(netID);
+							}
+
+							//Try checking parity if this didn't pass CRC
+							if (not error_free) {
+								//Recalculate the transmitter ID here assuming the legacy parity format.
+								//Multiply by 8192 and 32 instead of shifting by 13 and 5
+								//bits respectively to avoid endian issues with bit shifting.
+								netID = ((unsigned int)data[9] * 8192)  + ((unsigned int)data[10] * 32) +
+									((unsigned int)data[11]>>3 );
+
+								//Even parity check
+								{
+									unsigned char p1 = 0;
+									unsigned char p2 = 0;
+									unsigned char p3 = 0;
+									unsigned long packet = ((unsigned int)data[9]  << 16) |
+										((unsigned int)data[10] <<  8) |
+										((unsigned int)data[11]);
+
+									int i;
+									/* XOR each group of 3 bytes until all of the 24 bits have been XORed. */
+									for (i = 7; i >= 0; --i) {
+										unsigned char triple = (packet >> (3 * i)) & 0x7;
+										p1 ^= triple >> 2;
+										p2 ^= (triple >> 1) & 0x1;
+										p3 ^= triple & 0x1;
+									}
+
+									/* If the end result of the XORs is three 0 bits then even parity held,
+									 * which suggests that the packet data is good. Otherwise there was a bit error. */
+									if (p1 ==  0 && p2 == 0 && p3 == 0) {
+										//Seems like a correct transmitter using the legacy parity format
+										error_free = true;
+										//If this tag is in the CRC tag list, wait for two parity
+										//packets to confirm the transition from CRC to parity.
+										//This is meant to catch the occasional error where a CRC
+										//tag just happens to pass parity.
+										if (crc_tags.count(netID)) {
+											crc_tags.erase(netID);
+											error_free = false;
+										}
+									}
+									else {
+										//Both CRC and parity failed
+										error_free = false;
+									}
+								}
+							}
 
               //Check to make sure this was a good packet.
-              if ((pkt->rssi != (int) 0) and (pkt->lqi != 0) and (pkt->crcok)) {
-                unsigned char* data = (unsigned char*)pkt;
+              if ((pkt->rssi != (int) 0) and (pkt->lqi != 0) and error_free) {
 
-/*
-                //Even parity check
-                bool parity_failed = false;
-                {
-                  unsigned char p1 = 0;
-                  unsigned char p2 = 0;
-                  unsigned char p3 = 0;
-                  unsigned long packet = ((unsigned int)data[9]  << 16) |
-                    ((unsigned int)data[10] <<  8) |
-                    ((unsigned int)data[11]);
-
-                  int i;
-*/
-                  /* XOR each group of 3 bytes until all of the 24 bits have been XORed. */
-/*                  for (i = 7; i >= 0; --i) {
-                    unsigned char triple = (packet >> (3 * i)) & 0x7;
-                    p1 ^= triple >> 2;
-                    p2 ^= (triple >> 1) & 0x1;
-                    p3 ^= triple & 0x1;
-                  }
-*/
-                  /* If the end result of the XORs is three 0 bits then even parity held,
-                   * which suggests that the packet data is good. Otherwise there was a bit error. */
-/*                  if (p1 ==  0 && p2 == 0 && p3 == 0) {
-                    parity_failed = false;
-                  }
-                  else {
-                    parity_failed = true;
-                  }
-                }
-*/
-//                if (not parity_failed) {
                   //Now assemble a sample data variable and send it to the aggregation server.
                   SampleData sd;
-                  //Calculate the tagID here instead of using be32toh since it is awkward to convert a
-                  //21 bit integer to 32 bits. Multiply by 8192 and 32 instead of shifting by 13 and 5
-                  //bits respectively to avoid endian issues with bit shifting.
-                  unsigned int netID = ((unsigned int)data[9] * 65536)  + ((unsigned int)data[10] * 256) +
-                    ((unsigned int)data[11] );
                   //We do not currently use the pip's local timestamp
                   //unsigned long time = ntohl(pkt->time);
                   unsigned long baseID = ntohl(pkt->boardID << 8);
@@ -481,7 +523,7 @@ int main(int ac, char** arg_vector) {
                         std::cout<<"Dropped: "<<(unsigned int)(pkt->dropped)<<" packets."<<std::endl;
                       }
 
-                      //TODO Add a flag to pring things out in hex
+                      //TODO Add a flag to print things out in hex
                       bool use_hex = false;
                       if (use_hex) {
                         std::cout<<std::hex<<sd.rx_id<<"\t"<<std::dec<<world_model::getGRAILTime()<<'\t'<<std::hex<<sd.tx_id<<std::dec;
@@ -497,7 +539,6 @@ int main(int ac, char** arg_vector) {
                       std::cout<<std::endl;
                     }
                   }
-//                } // Parity check
               }
             }
           }
