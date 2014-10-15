@@ -245,9 +245,6 @@ int main(int ac, char** arg_vector) {
 						}
 						else {
 
-							if (0 < pkt->dropped) {
-								std::cout<<"Dropped: "<<(unsigned int)(pkt->dropped)<<" packets."<<std::endl;
-							}
 							//Print out the packet (in hex or decimal)
 							if (use_hex) {
 								std::cout<<std::hex<<sd.rx_id<<"\t"<<std::dec<<sd.rx_timestamp<<'\t'<<std::hex<<sd.tx_id<<std::dec;
