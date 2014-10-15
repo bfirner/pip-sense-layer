@@ -57,6 +57,8 @@
 //Handle interrupt signals to exit cleanly.
 #include <signal.h>
 
+#include "spi.h"
+
 using std::string;
 using std::list;
 using std::map;
@@ -98,11 +100,9 @@ float toFloat(unsigned char* pipFloat) {
 //3 Byte receiver ID, 21 bit transmitter id, 3 bits of parity plus up to 20 bytes of extra data.
 typedef struct {
 	unsigned char ex_length : 8; //Length of data in the optional data portion
-	unsigned char dropped   : 8; //The number of packet that were dropped if the queue overflowed.
-	unsigned int boardID    : 24;//Basestation ID
+	unsigned int boardID    : 32;//Basestation ID
 	unsigned int time       : 32;//Timestamp in quarter microseconds.
-	unsigned int tagID      : 21;//Transmitter ID
-	unsigned int parity     : 3; //Even parity check on the transmitter ID
+	unsigned int tagID      : 24;//Transmitter ID
 	unsigned char rssi      : 8; //Received signal strength indicator
 	unsigned char status    : 8; //The lower 7 bits contain the link quality indicator
 	unsigned char data[20];      //The optional variable length data segment
@@ -123,7 +123,7 @@ int main(int ac, char** arg_vector) {
     std::cerr<<"This program requires 2 arguments,"<<
       " the ip address and the port number of the aggregation server to send data to.\n";
     std::cerr<<"An optional third argument specifies the minimum RSS for a packet to be reported.\n";
-    std::cerr<<"An optional forth argument specifies the debug level (1-10) \n";
+    std::cerr<<"An optional fourth argument specifies the debug level (1-10) \n";
     std::cerr<<"If 'offline' is given as the last argument then this program will not connect to the aggregator and will instead print packets to the screen.\n";
     return 0;
   }
@@ -148,37 +148,21 @@ int main(int ac, char** arg_vector) {
     }
   }
 
+  //TODO Add a user flag to print things out in hex
+  bool use_hex = false;
+
   //Set up a signal handler to catch interrupt signals so we can close gracefully
   signal(SIGINT, handler);  
+  signal(SIGKILL, handler);  
 
   //Initialize SPI connection
   if (!bcm2835_init()) {
+      std::cerr<<"Error initializing PI bus! Aborting.\n";
 	  return 1;
   }
 
-  //MSB for SPI
-  bcm2835_spi_setBitOrder(BCM2835_SPI_BIT_ORDER_MSBFIRST);
-
-  //Set the clock mode to 488.3 KHz
-  bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_512);
-  //TODO There is an error with the SPI bus in the Pi that prevents
-  //spi clocks higher than 488 KHz
-  //Set the clock mode to 976.56 KHz
-  //bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_256);
-  //Set the clock mode to 3.906MHz
-  //bcm2835_spi_setClockDivider(BCM2835_SPI_CLOCK_DIVIDER_64);
-
-  //Set SPI data mode, polarity off, phase on
-  bcm2835_spi_setDataMode(BCM2835_SPI_MODE1);
-
-  //Use chip select 0
-  bcm2835_spi_chipSelect(BCM2835_SPI_CS0);
-
-  //Chip select active when low
-  bcm2835_spi_setChipSelectPolarity(BCM2835_SPI_CS0, 0);
-
-  //Turn on SPI pins
-  bcm2835_spi_begin();
+  //Set up the SPI pins
+  setupSPI();
 
   while (not killed) {
     SensorConnection agg(server_ip, server_port);
@@ -186,74 +170,52 @@ int main(int ac, char** arg_vector) {
     //A try/catch block is set up to handle exceptions during data transfer
     try {
       while ((offline or agg) and not killed) {
+		//See if we dropped any packets
+		exchangeByte(REQ_DROPPED, SPI_RATE);
+		uint8_t dropped = exchangeByte(REQ_NULL, SPI_RATE);
+		if (0 < dropped) {
+			if (pip_debug > DEBUG_BAD) {
+				std::cout<<"SPI under-read, "<<(unsigned int)dropped<<" packets dropped.\n";
+			}
+		}
 
 		//Try to read some data. First see how long the next packet is
-		//Sending 0xFF initialized a packet transmission
-		bcm2835_spi_transfer(0xFF);
-		//Read twice to get the length value (first time it isn't ready)
-		uint8_t transferred = bcm2835_spi_transfer(0x1);
-		transferred = bcm2835_spi_transfer(0x1);
+		exchangeByte(REQ_PACKET, SPI_RATE);
+		uint8_t transferred = exchangeByte(REQ_NULL, SPI_RATE);
+
 		//Verify that there is a packet to read
 		if (0 < transferred and transferred <= MAX_PACKET_SIZE_READ) {
-			std::cout<<"Reading packet of length "<<(unsigned int)transferred<<'\n';
 			uint8_t buf[MAX_PACKET_SIZE_READ];
 			memset(buf, 0, MAX_PACKET_SIZE_READ);	  
 			//Get the packet
-			bcm2835_spi_transfernb((char*)buf, (char*)buf, (unsigned int)transferred);
+			//bcm2835_spi_transfernb((char*)buf, (char*)buf, (unsigned int)transferred);
+			for (int i = 0; i < transferred; ++i) {
+				buf[i] = exchangeByte(REQ_NULL, SPI_RATE);
+			}
 
 			//TODO FIXME Debugging received packet
+			/*
 			std::cout<<"Packet is: ";
 			for (int i = 0; i < transferred; ++i) {
 				std::cout<<'\t'<<std::hex<<(uint32_t)buf[i];
 			}
 			std::cout<<'\n';
-			
-
+			*/
 
 			//Overlay the packet struct on top of the pointer to the rpip's message.
 			pip_packet_t *pkt = (pip_packet_t *)buf;
 			//Check to make sure this was a good packet.
 			if (((pkt->rssi != (int) 0) and (pkt->status != 0))) {
-				unsigned char* data = (unsigned char*)pkt;
-
-				//Even parity check
-				bool parity_failed = false;
-				{
-					unsigned char p1 = 0;
-					unsigned char p2 = 0;
-					unsigned char p3 = 0;
-					unsigned long packet = ((unsigned int)data[9]  << 16) |
-						((unsigned int)data[10] <<  8) |
-						((unsigned int)data[11]);
-
-					int i;
-					/* XOR each group of 3 bytes until all of the 24 bits have been XORed. */
-					for (i = 7; i >= 0; --i) {
-						unsigned char triple = (packet >> (3 * i)) & 0x7;
-						p1 ^= triple >> 2;
-						p2 ^= (triple >> 1) & 0x1;
-						p3 ^= triple & 0x1;
-					}
-					/* If the end result of the XORs is three 0 bits then even parity held,
-					 * which suggests that the packet data is good. Otherwise there was a bit error. */
-					if (p1 ==  0 && p2 == 0 && p3 == 0) {
-						parity_failed = false;
-					}
-					else {
-						parity_failed = true;
-					}
-				}
-				if (true or not parity_failed) {
+				//Process packet if its CRC is OK
+				if (pkt->status & CRC_OK) {
 					//Now assemble a sample data variable and send it to the aggregation server.
 					SampleData sd;
-					//Calculate the tagID here instead of using be32toh since it is awkward to convert a
-					//21 bit integer to 32 bits. Multiply by 8192 and 32 instead of shifting by 13 and 5
-					//bits respectively to avoid endian issues with bit shifting.
-					unsigned int netID = ((unsigned int)data[9] * 8192)  + ((unsigned int)data[10] * 32) +
-						((unsigned int)data[11] >> 3);
+					//Get the transmitter and receiver IDs, converting endianness
+					//unsigned int netID = ntohl(pkt->tagID << 8);
+					unsigned int netID = (buf[9]<<16) + (buf[10]<<8) + buf[11];
+					unsigned long baseID = ntohl(pkt->boardID);
 					//We do not currently use the pip's local timestamp
 					//unsigned long time = ntohl(pkt->time);
-					unsigned long baseID = ntohl(pkt->boardID << 8);
 
 					//The physical layer of a pipsqueak device is 1
 					sd.physical_layer = 1;
@@ -266,7 +228,7 @@ int main(int ac, char** arg_vector) {
 					//Convert from one byte value to a float for receive signal
 					//strength as described in the TI/chipcon Design Note DN505 on cc1100
 					sd.rss = ( (pkt->rssi) >= 128 ? (signed int)(pkt->rssi-256)/2.0 : (pkt->rssi)/2.0) - RSSI_OFFSET;
-					sd.sense_data = std::vector<unsigned char>(pkt->data, pkt->data+((unsigned char*)buf)[0]);
+					sd.sense_data = std::vector<unsigned char>(pkt->data, pkt->data+pkt->ex_length);
 					sd.valid = true;
 
 					if (pip_debug > DEBUG_GOOD) { 
@@ -274,14 +236,8 @@ int main(int ac, char** arg_vector) {
 								netID, baseID, sd.rss, pkt->ex_length);
 					}
 
-					if (pip_debug > DEBUG_BAD
-							and 0 < pkt->dropped) { 
-						std::cout<<"USB under-read, "<<(unsigned int)pkt->dropped<<" packets dropped.\n";
-					}
-
-
 					//Send the sample data as long as it meets the min RSS constraint
-					if (true or sd.rss > min_rss) {
+					if (sd.rss > min_rss) {
 						//Send data to the aggregator if we are not in offline mode
 						//Otherwise print out the packet
 						if (not offline) {
@@ -292,19 +248,16 @@ int main(int ac, char** arg_vector) {
 							if (0 < pkt->dropped) {
 								std::cout<<"Dropped: "<<(unsigned int)(pkt->dropped)<<" packets."<<std::endl;
 							}
-
-							//TODO Add a flag to pring things out in hex
-							bool use_hex = false;
+							//Print out the packet (in hex or decimal)
 							if (use_hex) {
-								std::cout<<std::hex<<sd.rx_id<<"\t"<<std::dec<<world_model::getGRAILTime()<<'\t'<<std::hex<<sd.tx_id<<std::dec;
-								//cout<<std::hex<<sd.rx_id<<"\t"<<std::dec<<sd.rx_timestamp<<'\t'<<std::hex<<sd.tx_id<<std::dec;
+								std::cout<<std::hex<<sd.rx_id<<"\t"<<std::dec<<sd.rx_timestamp<<'\t'<<std::hex<<sd.tx_id<<std::dec;
 							}
 							else {
-								std::cout<<std::dec<<sd.rx_id<<"\t"<<sd.rx_timestamp<<'\t'<<sd.tx_id;
+								std::cout<<std::dec<<baseID<<"\t"<<sd.rx_timestamp<<'\t'<<std::dec<<netID;
 							}
 							std::cout<<"\t0\t"<<sd.rss<<"\t0x00\tExtra:"<<sd.sense_data.size();
 							for (auto I = sd.sense_data.begin(); I != sd.sense_data.end(); ++I) {
-								std::cout<<'\t'<<(uint32_t)(*I);
+								std::cout<<'\t'<<std::hex<<(uint32_t)(*I);
 							}
 							std::cout<<std::endl;
 						}
@@ -315,12 +268,7 @@ int main(int ac, char** arg_vector) {
 		//Size seems too large, read from SPI to empty the buffer
 		else if (transferred >= MAX_PACKET_SIZE_READ) {
 			std::cerr<<"SPI seems mis-aligned (got packet of length "<<(unsigned int)transferred<<"), trying to realign\n";
-			//Toggle SPI
-			//Turn on SPI pins
-			bcm2835_spi_end();
-			bcm2835_spi_begin();
-			//Read until we get a 0
-			while (0 != bcm2835_spi_transfer(0xFD));
+			while (0 != exchangeByte(REQ_REALIGN, SPI_RATE) and not killed);
 			std::cerr<<"SPI re-aligned\n";
 		}
 		//No data, so try to sleep to reduce CPU consumption
@@ -342,7 +290,7 @@ int main(int ac, char** arg_vector) {
   std::cerr<<"Exiting\n";
 
   //Turn off SPI pins
-  bcm2835_spi_end();
+  tearDownSPI();
 
   //Normal program halt
   return 0;
