@@ -28,6 +28,8 @@
 //#define SPI_RATE 60
 #define SPI_RATE 100
 
+bool startupBPIP();
+
 void setupSPI();
 
 void tearDownSPI();

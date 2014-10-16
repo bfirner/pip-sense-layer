@@ -6,6 +6,64 @@
 
 #include "spi.h"
 
+//Send the startup sequence to the B-PIP
+bool startupBPIP() {
+	uint8_t working = 0;
+	//All transitions should occur in 8ms intervals,
+	//but the PIP clock is not a reliable source.
+	//Start at 7 ms intervals and go up to 9 ms intervals
+	for (int interval = 7000; (0 == working and interval <= 9000); interval += 1000) {
+
+		//Set all of the outputs 
+		bcm2835_gpio_fsel(SCLK, BCM2835_GPIO_FSEL_OUTP);
+		bcm2835_gpio_fsel(MOSI, BCM2835_GPIO_FSEL_OUTP);
+		bcm2835_gpio_fsel(MISO, BCM2835_GPIO_FSEL_OUTP);
+		//Clear the output pins and leave them low for two 8ms periods
+		bcm2835_gpio_clr(SCLK);
+		bcm2835_gpio_clr(MOSI);
+		bcm2835_gpio_clr(MISO);
+		bcm2835_delayMicroseconds(interval);
+		bcm2835_delayMicroseconds(interval);
+
+		//SOMI goes high and hold for 8ms
+		bcm2835_gpio_write(MISO, HIGH);
+		bcm2835_delayMicroseconds(interval);
+
+		//MISO stays high, SCLK goes high, and hold for 8ms
+		bcm2835_gpio_write(SCLK, HIGH);
+		bcm2835_delayMicroseconds(interval);
+
+		//MISO stays high, SCLK goes low, and hold for 8ms
+		bcm2835_gpio_write(SCLK, LOW);
+		bcm2835_delayMicroseconds(interval);
+
+		//MISO goes low and hold for 8ms
+		bcm2835_gpio_write(MISO, LOW);
+		bcm2835_delayMicroseconds(interval);
+
+		//Look for a success indication from the BPIP
+		bcm2835_gpio_fsel(MISO, BCM2835_GPIO_FSEL_INPT);
+		bcm2835_delayMicroseconds(interval);
+		working = bcm2835_gpio_lev(MISO);
+	}
+
+	//Clear the output pins and leave them low for two 8ms periods
+	bcm2835_gpio_clr(SCLK);
+	bcm2835_gpio_clr(MOSI);
+	bcm2835_gpio_clr(MISO);
+
+	//Indicate if we succeeded or failed
+	if (0 == working) {
+		return false;
+	}
+	else {
+		//Wait for the working pin to drop low
+		bcm2835_gpio_fsel(MISO, BCM2835_GPIO_FSEL_INPT);
+		while ( bcm2835_gpio_lev(MISO));
+		return true;
+	}
+}
+
 void setupSPI() {
 	/*
 	//Use bcm2835_gpio_fsel(uint8_t pin, uint8_t mode) to set pin modes

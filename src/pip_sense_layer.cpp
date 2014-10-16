@@ -161,6 +161,12 @@ int main(int ac, char** arg_vector) {
 	  return 1;
   }
 
+  //Send the start signal to the BPIP
+  if (not startupBPIP()) {
+    std::cerr<<"Failed to initialize communication with the B-PIP, aborting.\n";
+    return 0;
+  }
+
   //Set up the SPI pins
   setupSPI();
 
