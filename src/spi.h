@@ -18,6 +18,8 @@
 #define MOSI RPI_GPIO_P1_19
 #define MISO RPI_GPIO_P1_21
 #define SCLK RPI_GPIO_P1_23
+//Reset pin 18, GPIO24
+#define RESET RPI_GPIO_P1_18
 
 #define REQ_DROPPED 0xFC
 #define REQ_REALIGN 0xFD
