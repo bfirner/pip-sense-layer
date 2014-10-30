@@ -176,7 +176,16 @@ void log(Outputs ... outputs) {
   logParts(outputs...);
 }
 
-void cachePacket() {
+//Cache packets to later send to the aggregator
+void cachePacket(SampleData& sd) {
+  //If logged size is less than 1MB
+  //Use mkstemp if a file isn't already open
+  //Log data to the temp file
+}
+
+//Transmit the cached packets
+void transmitCache(SensorConnection& agg) {
+  //Send data to the aggregator
 }
 
 void attachPIPs(list<libusb_device_handle*> &pip_devs) {
