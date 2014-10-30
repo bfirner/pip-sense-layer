@@ -17,8 +17,8 @@ ELSE(NOT OWL_INC_DIR)
   STRING(REGEX REPLACE "/owl" "" OWL_INC_DIR ${OWL_INC_DIR})
 ENDIF(NOT OWL_INC_DIR)
 
+include_directories ("${pip-sense-layer_SOURCE_DIR}/include")
 include_directories ("${OWL_INC_DIR}")
-
 add_subdirectory (src bin)
 
 #Set the correct library directory suffix

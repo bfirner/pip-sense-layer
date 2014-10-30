@@ -30,6 +30,8 @@
 #include <owl/sensor_connection.hpp>
 #include <owl/world_model_protocol.hpp>
 
+#include "offlinecache.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -69,6 +71,10 @@ using std::pair;
 
 #define MAX_PACKET_SIZE_READ		(64 *1024 )
 #define MAX_PACKET_SIZE_WRITE		512
+
+//Cache at most 1MB of data
+#define CACHE_SIZE 1000000
+std::string program_str = "pip_sense_layer";
 
 /* various debug levels */ 
 #define DEBUG_BAD 1 
@@ -174,18 +180,6 @@ void log(Outputs ... outputs) {
   std::cout<<outstr<<' ';
   //Output all of the parts of the message and then a new line
   logParts(outputs...);
-}
-
-//Cache packets to later send to the aggregator
-void cachePacket(SampleData& sd) {
-  //If logged size is less than 1MB
-  //Use mkstemp if a file isn't already open
-  //Log data to the temp file
-}
-
-//Transmit the cached packets
-void transmitCache(SensorConnection& agg) {
-  //Send data to the aggregator
 }
 
 void attachPIPs(list<libusb_device_handle*> &pip_devs) {
@@ -352,6 +346,9 @@ int main(int ac, char** arg_vector) {
     gettimeofday(&tval, NULL);
     last_usb_check = tval.tv_sec*1000.0 + tval.tv_usec/1000.0;
   }
+	
+	//Prepare the offline cache
+	OfflineCache cache(program_str, CACHE_SIZE);
 
   while (not killed) {
     SensorConnection agg(server_ip, server_port);
@@ -362,6 +359,7 @@ int main(int ac, char** arg_vector) {
         //Try to reconnect if we are not operating in offline mode
         if (not offline and not agg) {
           agg.reconnect();
+					//TODO FIXME Send the cached data
         }
         //Check for new USB devices every second
         float cur_time;
@@ -510,9 +508,7 @@ int main(int ac, char** arg_vector) {
                   sd.tx_id = netID;
                   sd.rx_id = baseID;
                   //Set this to the real timestamp, milliseconds since 1970
-                  timeval tval;
-                  gettimeofday(&tval, NULL);
-                  sd.rx_timestamp = tval.tv_sec*1000 + tval.tv_usec/1000;
+                  sd.rx_timestamp = msecTime();
                   //Convert from one byte value to a float for receive signal
                   //strength as described in the TI/chipcon Design Note DN505 on cc1100
                   sd.rss = ( (pkt->rssi) >= 128 ? (signed int)(pkt->rssi-256)/2.0 : (pkt->rssi)/2.0) - RSSI_OFFSET;
@@ -531,19 +527,20 @@ int main(int ac, char** arg_vector) {
                   //Send the sample data as long as it meets the min RSS constraint
                   if (sd.rss > min_rss) {
                     //Send data to the aggregator if we are not in offline mode
-                    //Otherwise print out the packet
                     if (not offline) {
                       try {
                         agg.send(sd);
                       }
                       catch (std::runtime_error& re) {
-                        std::cerr<<"Error sending packet, caching instead.\n";
-                        //cachePacket(sd);
+                        log("Error sending packet, caching instead.");
+												//Cache the packet
+												cache.cachePacket(sd);
                       }
                     }
+                    //In offline mode just print out the packet
                     else {
 
-                      //TODO Add a flag to pring things out in hex
+                      //TODO Add a flag to print things out in hex
                       bool use_hex = false;
                       if (use_hex) {
                         std::cout<<std::hex<<sd.rx_id<<"\t"<<std::dec<<world_model::getGRAILTime()<<'\t'<<std::hex<<sd.tx_id<<std::dec;
