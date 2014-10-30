@@ -25,8 +25,6 @@
  *
  * @author Bernhard Firner
  ******************************************************************************/
-//TODO Create lib-cppsensor so that sockets don't need to be handled here.
-
 //These includes need to come first because of the macro defining INT64_MAX
 //TODO FIXME Are some of the old C-style includes breaking this macro?
 #include <owl/sensor_connection.hpp>
@@ -76,7 +74,7 @@ using std::pair;
 #define DEBUG_BAD 1 
 #define DEBUG_GOOD 5 
 #define DEBUG_ALL  10
-unsigned int pip_debug ; 
+unsigned int pip_debug = 0; 
 
 typedef unsigned int frequency;
 typedef unsigned char bsid;
@@ -149,6 +147,38 @@ map<struct libusb_device_handle*, int8_t> versions;
 #define TI_LABS_VENDOR  ((unsigned short) (0x2047))
 #define TI_LABS_PIPPROD ((unsigned short) (0x0300))
 
+#include <iomanip>
+#include <ctime>
+#include <locale>
+
+//A newline is output when all parts of a log message are written
+void logParts() {
+  std::cout<<'\n';
+}
+
+template<typename First, typename ... Outputs>
+void logParts(First first, Outputs ... outputs) {
+  std::cout<<first;
+  logParts(outputs...);
+}
+
+//Log this message with a prepended time stamp
+template<typename ... Outputs>
+void log(Outputs ... outputs) {
+  std::time_t t = std::time(nullptr);
+  char outstr[100] = {0};
+  //Log this message with ISO 8601 date and time prepended
+  std::strftime(outstr, 99, "%F %T", std::localtime(&t));
+  //TODO When std::put_time is well supported it should replace strftime
+  //std::cout<<std::put_time(std::localtime(&t), "%F %T");
+  std::cout<<outstr<<' ';
+  //Output all of the parts of the message and then a new line
+  logParts(outputs...);
+}
+
+void cachePacket() {
+}
+
 void attachPIPs(list<libusb_device_handle*> &pip_devs) {
   //Keep track of the count of USB devices. Don't check if this doesn't change.
   //static int last_usb_count = 0;
@@ -189,7 +219,7 @@ void attachPIPs(list<libusb_device_handle*> &pip_devs) {
 
         if (0 != err) {
           if (LIBUSB_ERROR_ACCESS == err) {
-            std::cout<<"Insufficient permission to open reader (try sudo).\n";
+            log("Insufficient permission to open reader (try sudo).");
           }
         }
         //Otherwise getting a handle was successful
@@ -198,7 +228,7 @@ void attachPIPs(list<libusb_device_handle*> &pip_devs) {
           if (0 == libusb_reset_device(new_handle)) {
             //Add the new device to the pip device list.
             pip_devs.push_back(new_handle);
-            std::cout<<"New pipsqueak opened.\n";
+            log("New pipsqueak opened.");
             in_use[device_num] = true;
             versions[new_handle] = version;
 
@@ -280,15 +310,15 @@ int main(int ac, char** arg_vector) {
   float min_rss = -600.0;
   if (ac > 3) {
     min_rss = atof(arg_vector[3]);
-    std::cout<<"Using min RSS "<<min_rss<<'\n';
+    log("Using min RSS ", min_rss);
   }
 
   if (ac > 4) {
     pip_debug = atoi(arg_vector[4]);
     if ( (pip_debug >= 1) && (pip_debug <= 10)) { 
-      std::cout<<"Using debug level "<<pip_debug<<'\n';
+      log("Using debug level ", pip_debug);
     } else {
-      std::cout<<"bad debug level "<<pip_debug<<'\n';   
+      log("bad debug level ", pip_debug);
       pip_debug = 0;      
     }
   }
@@ -317,9 +347,13 @@ int main(int ac, char** arg_vector) {
   while (not killed) {
     SensorConnection agg(server_ip, server_port);
 
-    //A try/catch block is set up to handle exception during quitting.
+    //A try/catch block is set up to handle exceptions during quit and from socket errors.
     try {
       while ((offline or agg) and not killed) {
+        //Try to reconnect if we are not operating in offline mode
+        if (not offline and not agg) {
+          agg.reconnect();
+        }
         //Check for new USB devices every second
         float cur_time;
         {
@@ -352,7 +386,7 @@ int main(int ac, char** arg_vector) {
               msg[0] = LM_GET_NEXT_PACKET;
               retval = libusb_bulk_transfer(*I, 2 | LIBUSB_ENDPOINT_OUT, msg, 1, &transferred, timeout);
               if (0 > retval) {
-                std::cout<<"Error requesting data: "<<strerror(retval)<<'\n';
+                log("Error requesting data: ", strerror(retval));
               }
               else {
                 memset(buf, 0, MAX_PACKET_SIZE_READ);	  
@@ -361,13 +395,13 @@ int main(int ac, char** arg_vector) {
                 if(0 == versions[*I]) {
                   retval = libusb_bulk_transfer(*I, 1 | LIBUSB_ENDPOINT_IN, buf+1, PACKET_LEN+20, &transferred, timeout);
                   if (0 > retval) {
-                    std::cout<<"Error transferring data (old pip): "<<strerror(retval)<<'\n';
+                    log("Error transferring data (old pip): ", strerror(retval));
                   }
                 }
                 else {
                   retval = libusb_bulk_transfer(*I, 2 | LIBUSB_ENDPOINT_IN, buf+1, PACKET_LEN+20, &transferred, timeout);
                   if (0 > retval) {
-                    std::cout<<"Error transferring data (gpip): "<<strerror(retval)<<'\n';
+                    log("Error transferring data (gpip): ", strerror(retval));
                   }
                 }
                 //Fill in the length of the extra portion of the packet
@@ -481,24 +515,24 @@ int main(int ac, char** arg_vector) {
                         netID, baseID, sd.rss, pkt->ex_length);
                   }
 
-                  if (pip_debug > DEBUG_BAD
-                      and 0 < pkt->dropped) { 
-                    std::cout<<"USB under-read, "<<(unsigned int)pkt->dropped<<" packets dropped.\n";
+                  if (0 < pkt->dropped) {
+                    log("USB under-read, ", (unsigned int)pkt->dropped, " packets dropped.");
                   }
-		  
 
                   //Send the sample data as long as it meets the min RSS constraint
                   if (sd.rss > min_rss) {
                     //Send data to the aggregator if we are not in offline mode
                     //Otherwise print out the packet
                     if (not offline) {
-                      agg.send(sd);
+                      try {
+                        agg.send(sd);
+                      }
+                      catch (std::runtime_error& re) {
+                        std::cerr<<"Error sending packet, caching instead.\n";
+                        //cachePacket(sd);
+                      }
                     }
                     else {
-
-                      if (0 < pkt->dropped) {
-                        std::cout<<"Dropped: "<<(unsigned int)(pkt->dropped)<<" packets."<<std::endl;
-                      }
 
                       //TODO Add a flag to pring things out in hex
                       bool use_hex = false;
