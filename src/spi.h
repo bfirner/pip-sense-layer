@@ -29,8 +29,9 @@
 #define MOSI RPI_GPIO_P1_19
 #define MISO RPI_GPIO_P1_21
 #define SCLK RPI_GPIO_P1_23
-//Reset pin 31, GPIO6
-#define RESET RPI_BPLUS_GPIO_J8_31
+//Reset pin 5, GPIO3
+#define RESET RPI_GPIO_P1_05
+//#define RESET RPI_BPLUS_GPIO_J8_31
 
 #define REQ_DROPPED 0xFC
 #define REQ_REALIGN 0xFD
