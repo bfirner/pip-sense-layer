@@ -6,13 +6,16 @@
 
 #include "spi.h"
 
+#include <iostream>
+
 //Send the startup sequence to the B-PIP
 bool startupBPIP() {
 	//Reset by holding low for 1ms, then go high and stay there
 	bcm2835_gpio_fsel(RESET, BCM2835_GPIO_FSEL_OUTP);
 	bcm2835_gpio_set_pud(RESET, BCM2835_GPIO_PUD_UP);
 	bcm2835_gpio_write(RESET, LOW);
-	bcm2835_delayMicroseconds(1000);
+        //Go low for 10 ms
+	bcm2835_delayMicroseconds(10000);
 	bcm2835_gpio_write(RESET, HIGH);
 	//Allow 10 ms to start up
 	bcm2835_delayMicroseconds(10000);

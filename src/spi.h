@@ -12,6 +12,7 @@
 
 //Bit banging SPI code
 
+/*
 //GPIO 10 is MOSI, pin is 19
 //GPIO  9 is MISO, pin is 21
 //GPIO 11 is SCLK, pin is 23
@@ -20,6 +21,16 @@
 #define SCLK RPI_GPIO_P1_23
 //Reset pin 18, GPIO24
 #define RESET RPI_GPIO_P1_18
+*/
+
+//GPIO 10 is MOSI, pin is 19
+//GPIO  9 is MISO, pin is 21
+//GPIO 11 is SCLK, pin is 23
+#define MOSI RPI_GPIO_P1_19
+#define MISO RPI_GPIO_P1_21
+#define SCLK RPI_GPIO_P1_23
+//Reset pin 31, GPIO6
+#define RESET RPI_BPLUS_GPIO_J8_31
 
 #define REQ_DROPPED 0xFC
 #define REQ_REALIGN 0xFD
